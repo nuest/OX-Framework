@@ -31,6 +31,7 @@ import static org.n52.oxf.sos.adapter.ISOSRequestBuilder.*;
 import java.io.IOException;
 
 import net.opengis.ows.x11.ExceptionReportDocument;
+import net.opengis.ows.x11.ExceptionType;
 
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpResponse;
@@ -55,7 +56,6 @@ import org.n52.oxf.util.web.ProxyAwareHttpClient;
 import org.n52.oxf.util.web.SimpleHttpClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.w3c.dom.Element;
 
 /**
  * SOS-Adapter for the OX-Framework
@@ -110,7 +110,7 @@ public class SOSAdapter implements IServiceAdapter {
      */
     public SOSAdapter(final String serviceVersion, final HttpClient httpclient) {
         this(serviceVersion, (ISOSRequestBuilder) null);
-        setHttpClient(httpclient); // override simple client
+        httpClient = httpclient; // override simple client
     }
 
     /**
@@ -184,7 +184,7 @@ public class SOSAdapter implements IServiceAdapter {
         paramContainer.addParameterShell("acceptVersions", serviceVersion);
         paramContainer.addParameterShell("service", "SOS");
 
-        final String baseUrlPost = url.toString();
+        final String baseUrlPost = url;
         final String baseUrlGet = baseUrlPost + "?";
         final Operation operation = new Operation("GetCapabilities", baseUrlGet, baseUrlPost);
         return initService(doOperation(operation, paramContainer));
@@ -259,16 +259,22 @@ public class SOSAdapter implements IServiceAdapter {
 
         final String request = buildRequest(operation, parameters);
 
+        if (operation.getDcps().length == 0) {
+        	throw new IllegalStateException("No DCP links available to send request to.");
+        }
+
+        String uri = null;
+        if (operation.getDcps()[0].getHTTPPostRequestMethods().size() > 0) {
+        	uri = operation.getDcps()[0].getHTTPPostRequestMethods().get(0).getOnlineResource().getHref();
+        }
+
+        /*
+         *  TODO implement support for different bindings using other HTTP methods than POST!
+         * Ideas: binding information in parameters and some default values resulting in the same 
+         * result like the current implementation
+         */
+
         try {
-            if (operation.getDcps().length == 0) {
-                throw new IllegalStateException("No DCP links available to send request to.");
-            }
-
-            String uri = null;
-            if (operation.getDcps()[0].getHTTPPostRequestMethods().size() > 0) {
-                uri = operation.getDcps()[0].getHTTPPostRequestMethods().get(0).getOnlineResource().getHref();
-            }
-
             final HttpResponse httpResponse = httpClient.executePost(uri.trim(), request, TEXT_XML);
             final HttpEntity responseEntity = httpResponse.getEntity();
             result = new OperationResult(responseEntity.getContent(), parameters, request);
@@ -285,7 +291,7 @@ public class SOSAdapter implements IServiceAdapter {
             try {
                 final XmlObject result_xb = XmlObject.Factory.parse(result.getIncomingResultAsStream());
                 if (result_xb.schemaType() == ExceptionReportDocument.type) {
-                    throw parseExceptionReport_100(result);
+                    throw parseOws110ExceptionReport(result);
                 }
             }
             catch (final XmlException e) {
@@ -315,10 +321,10 @@ public class SOSAdapter implements IServiceAdapter {
             return requestBuilder.buildGetFeatureOfInterestRequest(parameters);
         }
         else if (operation.getName().equals(INSERT_OBSERVATION)) {
-            return requestBuilder.buildInsertObservation(parameters);
+            return requestBuilder.buildInsertObservationRequest(parameters);
         }
         else if (operation.getName().equals(REGISTER_SENSOR)) {
-            return requestBuilder.buildRegisterSensor(parameters);
+            return requestBuilder.buildRegisterSensorRequest(parameters);
         }
         else if (operation.getName().equals(GET_OBSERVATION_BY_ID)) {
             return requestBuilder.buildGetObservationByIDRequest(parameters);
@@ -366,21 +372,15 @@ public class SOSAdapter implements IServiceAdapter {
         return featureCollection;
     }
 
-    private ExceptionReport createExceptionReportException(final Element exceptionReport, final OperationResult result) {
-        // TODO Auto-generated method stub
-        return null;
-    }
-
-    private ExceptionReport parseExceptionReport_100(final OperationResult result) throws XmlException, IOException {
-
+    private ExceptionReport parseOws110ExceptionReport(final OperationResult result) throws IOException, XmlException {
         final ExceptionReportDocument xb_execRepDoc = ExceptionReportDocument.Factory.parse(result.getIncomingResultAsStream());
-        final net.opengis.ows.x11.ExceptionType[] xb_exceptions = xb_execRepDoc.getExceptionReport().getExceptionArray();
+        final ExceptionType[] xb_exceptions = xb_execRepDoc.getExceptionReport().getExceptionArray();
 
         final String language = xb_execRepDoc.getExceptionReport().getLang();
         final String version = xb_execRepDoc.getExceptionReport().getVersion();
 
         final ExceptionReport oxf_execReport = new ExceptionReport(version, language);
-        for (final net.opengis.ows.x11.ExceptionType xb_exec : xb_exceptions) {
+        for (final ExceptionType xb_exec : xb_exceptions) {
             final String execCode = xb_exec.getExceptionCode();
             final String[] execMsgs = xb_exec.getExceptionTextArray();
             final String locator = xb_exec.getLocator();
@@ -389,9 +389,7 @@ public class SOSAdapter implements IServiceAdapter {
 
             oxf_execReport.addException(owsExec);
         }
-
         return oxf_execReport;
-
     }
 
     /**
